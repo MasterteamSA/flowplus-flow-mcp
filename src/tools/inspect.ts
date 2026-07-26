@@ -79,8 +79,10 @@ export function registerInspectTools(server: McpServer, { client }: ToolContext)
       description:
         "Runs server-side validation and returns structured issues. Each issue names the offending " +
         "node (targetKey), the field (fieldPath / configPath) and a suggestedFix. Use these to " +
-        "repair the definition and re-submit with flow_update_draft. If issues persist after about " +
-        "three attempts, stop and report them rather than continuing to guess.",
+        "repair the definition and submit a corrected version with flow_create_draft — there is no " +
+        "update-in-place tool, so each repair produces a new draft and the superseded one is deleted " +
+        "by a human in Studio. If issues persist after about three attempts, stop and report them " +
+        "rather than continuing to guess.",
       inputSchema: { automationId: z.number().int().describe("The automation id.") },
     },
     guard(async ({ automationId }: { automationId: number }) => {

@@ -57,15 +57,31 @@ export function registerCatalogTools(server: McpServer, { catalog }: ToolContext
       const outputs: Record<string, unknown> = {};
       for (const node of found) outputs[node.nodeType] = node["routeOutputKeys"] ?? [];
 
+      // Disabled node types keep their schema, so nothing about the descriptor
+      // says "you cannot use this" until import rejects the finished graph.
+      const disabled = found
+        .filter((n) => n["isAvailable"] === false)
+        .map((n) => ({
+          key: n.key,
+          reason: (n["unavailableReason"] as string | undefined) ?? "not available on this server",
+        }));
+
       return ok({
         nodeTypes: found,
         ...(notFound.length ? { notFound, suggestions } : {}),
         routeOutputKeys: outputs,
+        ...(disabled.length ? { unavailable: disabled } : {}),
         reminder:
           "Use the PascalCase `nodeType` value as the node's `type`. A route's `sourceOutputKey` " +
           "must be one of the source node's routeOutputKeys shown above — most nodes use " +
           "'success'/'failure', but `if` uses true/false and approvals use Approved/Rejected/etc. " +
-          "'default' is only valid on `switch`.",
+          "'default' is only valid on `switch`. Where config carries `allowedDecisions`, listing a " +
+          "subset REMOVES the other outputs from that node. Where it carries `branches`, those keys " +
+          "ADD outputs. Read the configSchema, not just routeOutputKeys." +
+          (disabled.length
+            ? ` WARNING: ${disabled.map((d) => d.key).join(", ")} is switched off on this server — ` +
+              `a draft using it cannot be published.`
+            : ""),
       });
     }),
   );

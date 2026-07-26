@@ -44,14 +44,11 @@ export function registerWriteTools(server: McpServer, { client, catalog }: ToolC
       },
     },
     guard(async ({ definition }: { definition: unknown }) => {
-      if (!client.writeEnabled) {
-        return fail(
-          "Draft creation is disabled. flowplus-flow-mcp starts read-only; set " +
-            "FLOWPLUS_WRITE_ENABLED=true in the server's environment to allow it. " +
-            "You can still design the definition and show it to the user.",
-        );
-      }
-
+      // The local checks run BEFORE the write gate on purpose. A read-only
+      // session is still designing a definition, and telling it "writes are
+      // off" while silently sitting on the knowledge that its AI inputs are
+      // malformed wastes the whole session. Refuse to create, but always say
+      // what is wrong with what you were handed.
       const parsed = automationDefinitionSchema.safeParse(definition);
       if (!parsed.success) {
         return fail(
@@ -90,7 +87,27 @@ export function registerWriteTools(server: McpServer, { client, catalog }: ToolC
       // ParallelStart derives its real outputs from config.branches[].key, so a
       // four-branch fan-out routes on b1..b4 and is perfectly valid. An earlier
       // version of this check refused exactly that. The server is the authority.
-      const outputWarnings = await checkOutputKeys(catalog, document);
+      const outputWarnings = [
+        ...(await checkOutputKeys(catalog, document)),
+        ...checkConfigShapes(document),
+        ...checkDuplicateRoutes(document),
+        ...checkExpressionNamespaces(document),
+        ...(await checkNodeAvailability(catalog, document)),
+      ];
+
+      if (!client.writeEnabled) {
+        return fail(
+          "Draft creation is disabled. flowplus-flow-mcp starts read-only; set " +
+            "FLOWPLUS_WRITE_ENABLED=true in the server's environment to allow it. " +
+            "You can still design the definition and show it to the user.\n\n" +
+            (outputWarnings.length
+              ? "The definition passed the structural checks, but these would need attention " +
+                "before it validates:\n" +
+                outputWarnings.map((w) => `  - ${w}`).join("\n")
+              : "The definition passed every local check, so it is ready to submit once writes " +
+                "are enabled."),
+        );
+      }
 
       const result = await client.request<any>(`${DESIGN}/automations/import`, {
         method: "POST",
@@ -155,20 +172,44 @@ async function checkOutputKeys(
     const declared = declaredForType.get(source.type.toLowerCase());
     if (!declared) continue;
 
-    // Union the declared outputs with any the node's own config defines.
-    const effective = new Set(declared);
-    for (const configured of configuredOutputKeys(source.config)) effective.add(configured);
+    // Config can widen the outputs (ParallelStart's branches) or narrow them
+    // (an approval's allowedDecisions). Narrowing is checked first because the
+    // declared list is then actively misleading: HumanApproval declares six
+    // decisions, but a node allowing only Approved/Rejected has exactly two
+    // plus TimedOut, and routing from Cancelled fails with no explanation.
+    const narrowed = narrowedOutputKeys(source.config);
+    const effective = new Set(narrowed ?? declared);
+    if (!narrowed) {
+      for (const configured of configuredOutputKeys(source.config)) effective.add(configured);
+    }
 
     if (effective.size === 0 || effective.has(route.sourceOutputKey)) continue;
 
     warnings.push(
       `routes[${index}]: "${route.sourceOutputKey}" is not among the known outputs of ` +
-        `"${route.sourceNodeKey}" (${source.type}) — expected one of ${[...effective].join(", ")}. ` +
-        `Submitted anyway; the server will reject it if genuinely wrong.`,
+        `"${route.sourceNodeKey}" (${source.type}) — expected one of ${[...effective].join(", ")}` +
+        (narrowed ? ` (narrowed by this node's allowedDecisions)` : "") +
+        `. Submitted anyway; the server will reject it if genuinely wrong.`,
     );
   }
 
   return warnings;
+}
+
+/**
+ * Output keys a node's own config *restricts* it to. `allowedDecisions` on the
+ * human nodes is the case: listing three decisions means the other three
+ * outputs do not exist on that node, whatever the catalog declares. TimedOut is
+ * always present because a timeout is not a decision anyone makes.
+ *
+ * Returns undefined when the config imposes no restriction.
+ */
+function narrowedOutputKeys(config: Record<string, unknown>): string[] | undefined {
+  const allowed = config["allowedDecisions"];
+  if (!Array.isArray(allowed) || allowed.length === 0) return undefined;
+  const decisions = allowed.filter((d): d is string => typeof d === "string");
+  if (!decisions.length) return undefined;
+  return [...new Set([...decisions, "TimedOut"])];
 }
 
 /**
@@ -182,6 +223,159 @@ function configuredOutputKeys(config: Record<string, unknown>): string[] {
   return branches
     .map((b) => (b && typeof b === "object" ? (b as Record<string, unknown>)["key"] : undefined))
     .filter((k): k is string => typeof k === "string" && k.length > 0);
+}
+
+/**
+ * Config shapes the server rejects with a message that does not say what the
+ * right shape is. Each of these cost a full round trip and a dead draft to
+ * discover, so they are worth catching here.
+ */
+function checkConfigShapes(document: {
+  nodes: Array<{ key: string; type: string; config: Record<string, unknown> }>;
+}): string[] {
+  const warnings: string[] = [];
+
+  for (const node of document.nodes) {
+    // AI node `inputs` are typed declarations, not bare expressions. Writing
+    // { customer: "={{ ... }}" } yields "input 'customer' must be a JSON object"
+    // with no hint that the value should be { type, source }.
+    if (node.type.startsWith("Ai") || node.type === "SpecializedAi") {
+      const inputs = node.config["inputs"];
+      if (inputs && typeof inputs === "object" && !Array.isArray(inputs)) {
+        for (const [name, value] of Object.entries(inputs as Record<string, unknown>)) {
+          if (typeof value !== "object" || value === null || Array.isArray(value)) {
+            warnings.push(
+              `nodes["${node.key}"].config.inputs.${name} is a ${typeof value}, but AI inputs are ` +
+                `typed declarations. Use { "type": "object", "source": "={{ ... }}" } — ` +
+                `type is one of string, number, boolean, date, object, array, enum, file.`,
+            );
+          } else if (!("type" in (value as Record<string, unknown>))) {
+            warnings.push(
+              `nodes["${node.key}"].config.inputs.${name} is missing the required "type" field ` +
+                `(string, number, boolean, date, object, array, enum, file).`,
+            );
+          }
+        }
+      }
+    }
+
+    // ConvertToFile's actionKey is the bare format, not the catalog key. The
+    // catalog lists 'convert-to-file-xlsx' as the key you look up, but the
+    // config wants 'xlsx' — an easy and silent-looking mismatch.
+    if (node.type === "ConvertToFile") {
+      const actionKey = node.config["actionKey"];
+      if (typeof actionKey === "string" && actionKey.startsWith("convert-to-file-")) {
+        warnings.push(
+          `nodes["${node.key}"].config.actionKey is "${actionKey}", but ConvertToFile wants the ` +
+            `bare format: "${actionKey.replace("convert-to-file-", "")}". The catalog key and the ` +
+            `actionKey value are different strings.`,
+        );
+      }
+    }
+  }
+
+  return warnings;
+}
+
+/**
+ * Two routes may not leave the same output of the same node — the server
+ * reports it as "duplicate Success priority 0", which does not obviously mean
+ * "you forked where you should have sequenced".
+ */
+function checkDuplicateRoutes(document: {
+  routes: Array<{ sourceNodeKey: string; sourceOutputKey: string; targetNodeKey: string }>;
+}): string[] {
+  const seen = new Map<string, string>();
+  const warnings: string[] = [];
+
+  for (const route of document.routes) {
+    const signature = `${route.sourceNodeKey}::${route.sourceOutputKey}`;
+    const existing = seen.get(signature);
+    if (existing) {
+      warnings.push(
+        `Two routes leave "${route.sourceNodeKey}" output "${route.sourceOutputKey}" ` +
+          `(to "${existing}" and "${route.targetNodeKey}"). The engine rejects this as a duplicate ` +
+          `priority. Sequence the steps, or fan out with ParallelStart.`,
+      );
+    } else {
+      seen.set(signature, route.targetNodeKey);
+    }
+  }
+
+  return warnings;
+}
+
+/**
+ * Expression roots the revision snapshot refuses. Deliberately a deny-list of
+ * roots confirmed to fail rather than an allow-list: the full accepted set is
+ * not published anywhere, and a wrong allow-list would flag valid expressions.
+ * `$now` and `$trigger` both read as obvious and are both refused, with an
+ * error that names the expression but not the reason.
+ */
+const REFUSED_ROOTS: Array<{ token: string; instead: string }> = [
+  { token: "$now", instead: "let the node stamp its own timestamp, or pass one in from the trigger payload" },
+  { token: "$trigger", instead: "read trigger values through the first node that consumes them" },
+];
+
+function checkExpressionNamespaces(document: Record<string, unknown>): string[] {
+  const expressions = JSON.stringify(document).match(/=\{\{[^}]*\}\}/g) ?? [];
+  const flagged = new Map<string, string>();
+
+  for (const expression of expressions) {
+    for (const { token, instead } of REFUSED_ROOTS) {
+      if (expression.includes(token)) flagged.set(expression, instead);
+    }
+  }
+
+  return [...flagged].map(
+    ([expression, instead]) =>
+      `Expression ${expression} uses a root the revision snapshot refuses ` +
+      `("unsupported expression namespace"). Instead: ${instead}. Confirmed-good root: $nodes.<key>.output.`,
+  );
+}
+
+/**
+ * A node type the tenant has switched off validates as a CONFIGURATION_ERROR at
+ * import time, after the whole graph has been authored around it. The catalog
+ * carries isAvailable/unavailableReason, so say it up front.
+ */
+async function checkNodeAvailability(
+  catalog: ToolContext["catalog"],
+  document: { nodes: Array<{ key: string; type: string }> },
+): Promise<string[]> {
+  const live = await catalog.get();
+  const byType = new Map<string, NodeAvailability>();
+
+  for (const descriptor of live.nodeTypes) {
+    const entry: NodeAvailability = {
+      isAvailable: descriptor["isAvailable"] as boolean | undefined,
+      reason: descriptor["unavailableReason"] as string | undefined,
+    };
+    byType.set(descriptor.nodeType.toLowerCase(), entry);
+    byType.set(descriptor.key.toLowerCase(), entry);
+  }
+
+  const reported = new Set<string>();
+  const warnings: string[] = [];
+
+  for (const node of document.nodes) {
+    const availability = byType.get(node.type.toLowerCase());
+    if (!availability || availability.isAvailable !== false) continue;
+    if (reported.has(node.type)) continue;
+    reported.add(node.type);
+    warnings.push(
+      `Node type "${node.type}" is not available on this server` +
+        (availability.reason ? `: ${availability.reason}` : "") +
+        `. Nodes of this type will fail validation until it is enabled.`,
+    );
+  }
+
+  return warnings;
+}
+
+interface NodeAvailability {
+  isAvailable?: boolean;
+  reason?: string;
 }
 
 /** Cross-checks node and trigger `type` values against the live catalog. */

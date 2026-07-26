@@ -106,8 +106,11 @@ export function registerGroundingTools(server: McpServer, { client }: ToolContex
         config: z
           .record(z.string(), z.unknown())
           .describe(
-            "Schedule config matching the schedule-trigger configSchema, " +
-              'e.g. { "scheduleType": "Cron", "cron": "0 9 * * 1", "timeZone": "UTC" }',
+            "The inner schedule object — what goes in the trigger's config.schedule, not the whole " +
+              "trigger config. Field names follow the schedule-trigger configUiSchema: " +
+              '{ "mode": "cron", "cronExpression": "0 9 * * 1", "timezone": "UTC" }. ' +
+              "Pass the same object verbatim as config.schedule on the ScheduleTrigger, so what you " +
+              "preview is what you build.",
           ),
       },
     },

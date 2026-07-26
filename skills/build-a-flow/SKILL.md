@@ -35,6 +35,14 @@ right.
 
 Never invent a module key, field name, or assignee.
 
+**If the tenant is empty** — no modules, no forms, no roles beyond a default admin
+group — say so before building, because it changes what the flow can be. You can
+still produce a structurally complete graph with stubbed integrations and every
+human step on the one group that exists, and that is genuinely useful for review.
+What you must not do is present it as wired. Name the gap in your report and in
+the automation's `description`, and let the user decide whether to configure the
+tenant first.
+
 ### 3. Pick blocks narrowly
 
 `flow_catalog` for the shortlist — it returns one line per node type, no schemas.
@@ -42,6 +50,12 @@ Then `flow_node_schema` for **only** the handful you chose.
 
 Do not ask for every node type. There are 52, each with a full JSON Schema; you
 will exhaust your context before writing anything.
+
+**Check `unavailableNodeTypes` in the response.** A node type the tenant has
+switched off still appears in the catalog with a full schema — the AI nodes are
+the usual case, disabled in Control Panel. It reads as usable until import
+rejects the finished graph. If something you need is off, say so *before* you
+build around it, and tell the user what has to be enabled.
 
 ### 4. Compose the definition
 
@@ -77,10 +91,35 @@ Rules that actually bite:
   `Approved`/`Rejected`/`Returned`/`Cancelled`/`Delegated`/`TimedOut`;
   `loop-over-items` has `loop`/`done`/`failure`. `"default"` is **not** a
   general-purpose value — only `switch` declares it.
-- **`routeOutputKeys` is a default, not a closed set.** `ParallelStart` declares
-  `branch_a`/`branch_b` but its real outputs are whatever keys you put in
-  `config.branches[]`. Configure four branches, route on those four keys — it
-  validates. You are not limited to two lanes.
+- **`routeOutputKeys` is a default, not a closed set — config moves it both ways.**
+  `config.branches[]` on `ParallelStart` **adds** outputs: configure four branches,
+  route on those four keys, it validates. You are not limited to two lanes.
+  `config.allowedDecisions` on the human nodes **removes** them: an approval
+  listing `["Approved","Rejected"]` has exactly those plus `TimedOut`, and a route
+  from `Cancelled` fails even though the catalog lists it. Read the configSchema,
+  not just `routeOutputKeys`.
+- **One route per output.** Two routes leaving the same node's same output are
+  rejected as `duplicate Success priority 0`. That message does not sound like
+  what it means: you forked where you should have sequenced. Chain the steps, or
+  fan out properly with `ParallelStart`.
+- **`actionKey` is not the catalog key.** `ConvertToFile` is looked up as
+  `convert-to-file-xlsx` but configured with `"actionKey": "xlsx"`. Same trap as
+  `type`, different field — the schema pins it as a `const`, so read it.
+- **AI node `inputs` are typed declarations, not expressions.** This is the single
+  biggest source of wasted drafts. Not `{ "customer": "={{ ... }}" }` but:
+  ```jsonc
+  "inputs": {
+    "customer": { "type": "object", "source": "={{ $nodes.fetch.output }}",
+                  "required": true, "description": "…" }
+  }
+  ```
+  `type` is one of string, number, boolean, date, object, array, enum, file. The
+  server's error — *"input 'customer' must be a JSON object"* — describes the
+  value it wanted, not the shape.
+- **Expressions: `$nodes.<key>.output` is the reliable root.** `$now` and
+  `$trigger` both look obvious and are both refused as an "unsupported expression
+  namespace". Let nodes stamp their own values rather than reaching for ambient
+  ones.
 - **Set `position`** so the graph is readable: x around 320, y increasing ~160
   per step, branches offset left and right.
 - Omitted JSON fields are filled in for you. You do not need to write empty
