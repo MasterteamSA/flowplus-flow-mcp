@@ -136,6 +136,40 @@ try {
       },
     },
   }), 700);
+  // REGRESSION: ParallelStart with four config-defined branches.
+  // An earlier version refused this, because it treated the catalog's
+  // routeOutputKeys (["branch_a","branch_b"]) as a closed set. It is not — this
+  // node derives its real outputs from config.branches[].key. Must be accepted.
+  const branches = [1, 2, 3, 4].map((i) => ({ key: `b${i}`, label: `Lane ${i}` }));
+  const parallelNodes = [
+    { key: "fan", type: "ParallelStart", name: "Fan out", config: { branches, strategy: "All" }, position: { x: 320, y: 120 } },
+  ];
+  const parallelRoutes = [];
+  branches.forEach((b, i) => {
+    parallelNodes.push({ key: `w${i + 1}`, type: "SetFields", name: `Work ${i + 1}`, config: { fields: { v: "1" } }, position: { x: 120 * (i + 1), y: 300 } });
+    parallelRoutes.push({ sourceNodeKey: "fan", sourceOutputKey: b.key, targetNodeKey: `w${i + 1}` });
+  });
+  const parallel = await send("tools/call", {
+    name: "flow_create_draft",
+    arguments: {
+      definition: {
+        name: "REGRESS parallel 4 branches",
+        triggers: [{ key: "t", type: "ManualTrigger", name: "T", config: { startNodeKey: "fan" } }],
+        nodes: parallelNodes,
+        routes: parallelRoutes,
+      },
+    },
+  });
+  console.log(`\n${isErr(parallel) ? "✗ REGRESSION — 4-branch refused" : "✓ 4-branch ParallelStart accepted"}`);
+  console.log("  " + text(parallel).replace(/\s+/g, " ").slice(0, 200));
+
+  // REGRESSION: schedule preview. The server wants the config nested under a
+  // `config` property; posting it at the top level 500s and looks like a broken
+  // endpoint. Must return nextFireAtUtc.
+  report("flow_schedule_preview (Mondays 9am UTC)", await send("tools/call", {
+    name: "flow_schedule_preview",
+    arguments: { config: { scheduleType: "Cron", cron: "0 9 * * 1", timeZone: "UTC" } },
+  }), 220);
 } catch (error) {
   console.error("\nSMOKE FAILED:", error.message);
   process.exitCode = 1;

@@ -99,19 +99,27 @@ export function registerGroundingTools(server: McpServer, { client }: ToolContex
     {
       title: "Validate a schedule and preview its next runs",
       description:
-        "Checks a schedule-trigger configuration and returns the next fire times. Use it to confirm " +
-        "'every Monday at 9am' became the cron you intended before committing it to a flow.",
+        "Checks a schedule-trigger configuration and returns the next fire time. Use it to confirm " +
+        "'every Monday at 9am' became the cron you intended before committing it to a flow — the " +
+        "response includes nextFireAtUtc, which is the cheapest way to catch an off-by-one-day cron.",
       inputSchema: {
         config: z
           .record(z.string(), z.unknown())
-          .describe("Schedule config matching the schedule-trigger configSchema."),
+          .describe(
+            "Schedule config matching the schedule-trigger configSchema, " +
+              'e.g. { "scheduleType": "Cron", "cron": "0 9 * * 1", "timeZone": "UTC" }',
+          ),
       },
     },
+    // The server expects the config NESTED under a `config` property
+    // (SchedulePreviewRequest.Config). Posting the config at the top level makes
+    // Config deserialise to an Undefined JsonElement and the request dies as an
+    // unhandled 500 — which reads convincingly like a broken endpoint. It is not.
     guard(async ({ config }: { config: Record<string, unknown> }) =>
       ok(
         await client.request(`${DESIGN}/builder/schedules/next-fire-preview`, {
           method: "POST",
-          body: config,
+          body: { config },
         }),
       ),
     ),

@@ -71,19 +71,67 @@ Rules that actually bite:
 
 - **`type` is the PascalCase `nodeType`**, not the lowercase catalog `key`.
   `SetFields`, not `set-fields`.
-- **`sourceOutputKey` must be an output the source node declares.** This is the
-  most common mistake. Most nodes have `success`/`failure`; `if` has
-  `true`/`false`; `switch` has `case_primary`/`default`; `human-approval` has
+- **`sourceOutputKey` must be an output the source node has.** This is the most
+  common mistake. Most nodes have `success`/`failure`; `if` has `true`/`false`;
+  `switch` has `case_primary`/`default`; `human-approval` has
   `Approved`/`Rejected`/`Returned`/`Cancelled`/`Delegated`/`TimedOut`;
   `loop-over-items` has `loop`/`done`/`failure`. `"default"` is **not** a
-  general-purpose value — only `switch` declares it. Read `routeOutputKeys` in
-  the `flow_node_schema` response.
+  general-purpose value — only `switch` declares it.
+- **`routeOutputKeys` is a default, not a closed set.** `ParallelStart` declares
+  `branch_a`/`branch_b` but its real outputs are whatever keys you put in
+  `config.branches[]`. Configure four branches, route on those four keys — it
+  validates. You are not limited to two lanes.
 - **Set `position`** so the graph is readable: x around 320, y increasing ~160
   per step, branches offset left and right.
 - Omitted JSON fields are filled in for you. You do not need to write empty
   `schema`, `authenticationPolicy`, `retryPolicy` and friends.
 
 Unsure of the shape? `flow_export` an existing automation and copy its structure.
+
+### 4b. Rework loops — unroll them forward
+
+The graph may not contain cycles. A process chart that loops ("rejected goes back
+to recalculation") cannot be built as a back-edge; the engine refuses it outright.
+
+Approvals have a `Returned` output that exists precisely for send-back. Unroll the
+loop into a forward chain:
+
+```
+calc → approve1 ─Approved──→ commit
+          ├─Returned→ fix → approve2 ─Approved→ commit
+          └─Rejected→ stop
+```
+
+Forward edges may converge on a shared node; they just may not loop back. So
+rework depth is fixed when you design it — two passes means two approval nodes.
+
+If the process needs unbounded rework, end the run on `Returned` and let a
+corrected re-run start a fresh execution. **Tell the user you did that**, because
+it changes the audit shape: each attempt becomes its own execution record.
+
+Do **not** reach for `LoopOverItems`. It is named "loop" and is the obvious wrong
+answer: it snapshots a collection once, runs its body once per item, and its body
+must return to the loop node itself. It iterates known collections; it cannot
+express conditional retry.
+
+### 4c. Human steps that collect data need a form
+
+A `HumanTask` without one will not validate. `config.formSource` takes:
+
+| Value | When |
+|---|---|
+| `ReuseTriggerForm` | flow is form-triggered and you want the same fields |
+| `InlineDraft` | build one with `flow_create_inline_form` |
+| `ExistingPublished` | bind a published form from `flow_forms` |
+
+For `InlineDraft` the order is: create the automation, then attach the form to the
+named node, then set `formDefinitionId` + `inlineDraftRevisionId` in the node
+config and resubmit. Field `defaultValue` can reference earlier steps, so a
+correction form arrives pre-filled with the values under dispute.
+
+Never silently downgrade a data-collecting step to a decide-only `HumanApproval`.
+That drops a requirement without saying so. If you genuinely cannot build the
+form, say which step is affected and why.
 
 ### 5. Create and repair
 

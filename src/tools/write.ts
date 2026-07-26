@@ -84,16 +84,13 @@ export function registerWriteTools(server: McpServer, { client, catalog }: ToolC
         );
       }
 
-      // The single most common authoring mistake: routing from an output the
-      // source node does not declare. The server catches it, but only after a
-      // round trip and without telling you what the valid options were.
-      const badOutputs = await findInvalidOutputKeys(catalog, document);
-      if (badOutputs.length) {
-        return fail(
-          "These routes leave from an output their source node does not have:\n" +
-            badOutputs.map((b) => `  - ${b}`).join("\n"),
-        );
-      }
+      // Routing from an output the source node does not declare is the most
+      // common authoring mistake — but this is only ever a HINT, never a block.
+      // `routeOutputKeys` is a default declaration, not an exhaustive list:
+      // ParallelStart derives its real outputs from config.branches[].key, so a
+      // four-branch fan-out routes on b1..b4 and is perfectly valid. An earlier
+      // version of this check refused exactly that. The server is the authority.
+      const outputWarnings = await checkOutputKeys(catalog, document);
 
       const result = await client.request<any>(`${DESIGN}/automations/import`, {
         method: "POST",
@@ -109,6 +106,7 @@ export function registerWriteTools(server: McpServer, { client, catalog }: ToolC
         name: result?.automation?.name,
         status: result?.automation?.status,
         validation,
+        ...(outputWarnings.length ? { clientWarnings: outputWarnings } : {}),
         unresolvedCredentialRefs: result?.unresolvedCredentialRefs ?? [],
         reviewUrl: automationId ? client.automationLink(automationId) : undefined,
         nextStep: validation?.isValid
@@ -120,51 +118,70 @@ export function registerWriteTools(server: McpServer, { client, catalog }: ToolC
 }
 
 /**
- * Cross-checks every route's sourceOutputKey against the source node type's
- * declared routeOutputKeys, and reports the valid alternatives inline so the
- * model can fix it in one step instead of guessing.
+ * Advisory check on route output keys.
+ *
+ * Returns warnings, never blocks. `routeOutputKeys` in the catalog is a DEFAULT
+ * declaration, not a closed set — some node types derive their real outputs from
+ * their own config. ParallelStart is the clear case: it declares
+ * ["branch_a","branch_b"] but a flow configuring four branches routes on those
+ * four branch keys and validates fine. Treating the declaration as exhaustive
+ * meant refusing valid flows, which is worse than letting the server decide.
  */
-async function findInvalidOutputKeys(
+async function checkOutputKeys(
   catalog: ToolContext["catalog"],
   document: {
-    nodes: Array<{ key: string; type: string }>;
+    nodes: Array<{ key: string; type: string; config: Record<string, unknown> }>;
     routes: Array<{ sourceNodeKey: string; sourceOutputKey: string; targetNodeKey: string }>;
   },
 ): Promise<string[]> {
   const live = await catalog.get();
 
-  const outputsForType = new Map<string, string[]>();
+  const declaredForType = new Map<string, string[]>();
   for (const descriptor of live.nodeTypes) {
     const outputs = (descriptor as { routeOutputKeys?: unknown }).routeOutputKeys;
     if (!Array.isArray(outputs)) continue;
     const list = outputs.filter((o): o is string => typeof o === "string");
-    outputsForType.set(descriptor.nodeType.toLowerCase(), list);
-    outputsForType.set(descriptor.key.toLowerCase(), list);
+    declaredForType.set(descriptor.nodeType.toLowerCase(), list);
+    declaredForType.set(descriptor.key.toLowerCase(), list);
   }
 
-  const typeOfNode = new Map(document.nodes.map((n) => [n.key, n.type]));
-  const problems: string[] = [];
+  const nodesByKey = new Map(document.nodes.map((n) => [n.key, n]));
+  const warnings: string[] = [];
 
   for (const [index, route] of document.routes.entries()) {
-    const sourceType = typeOfNode.get(route.sourceNodeKey);
-    if (!sourceType) continue; // already reported by checkStructure
-    const valid = outputsForType.get(sourceType.toLowerCase());
-    if (!valid) continue; // catalog did not declare any; let the server decide
+    const source = nodesByKey.get(route.sourceNodeKey);
+    if (!source) continue; // checkStructure already reported this
 
-    if (valid.length === 0) {
-      problems.push(
-        `routes[${index}]: node "${route.sourceNodeKey}" (${sourceType}) is terminal and has no outputs, so nothing can route out of it`,
-      );
-      continue;
-    }
-    if (!valid.includes(route.sourceOutputKey)) {
-      problems.push(
-        `routes[${index}]: "${route.sourceOutputKey}" is not an output of "${route.sourceNodeKey}" (${sourceType}). Valid outputs: ${valid.join(", ")}`,
-      );
-    }
+    const declared = declaredForType.get(source.type.toLowerCase());
+    if (!declared) continue;
+
+    // Union the declared outputs with any the node's own config defines.
+    const effective = new Set(declared);
+    for (const configured of configuredOutputKeys(source.config)) effective.add(configured);
+
+    if (effective.size === 0 || effective.has(route.sourceOutputKey)) continue;
+
+    warnings.push(
+      `routes[${index}]: "${route.sourceOutputKey}" is not among the known outputs of ` +
+        `"${route.sourceNodeKey}" (${source.type}) — expected one of ${[...effective].join(", ")}. ` +
+        `Submitted anyway; the server will reject it if genuinely wrong.`,
+    );
   }
 
-  return problems;
+  return warnings;
+}
+
+/**
+ * Output keys a node's own config contributes. Currently that means
+ * ParallelStart's `branches[].key`; the shape check is deliberately loose so
+ * other config-driven node types are picked up without a code change here.
+ */
+function configuredOutputKeys(config: Record<string, unknown>): string[] {
+  const branches = config["branches"];
+  if (!Array.isArray(branches)) return [];
+  return branches
+    .map((b) => (b && typeof b === "object" ? (b as Record<string, unknown>)["key"] : undefined))
+    .filter((k): k is string => typeof k === "string" && k.length > 0);
 }
 
 /** Cross-checks node and trigger `type` values against the live catalog. */
