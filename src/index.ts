@@ -19,6 +19,7 @@ import { registerCatalogTools } from "./tools/catalog.js";
 import { registerInspectTools } from "./tools/inspect.js";
 import { registerGroundingTools } from "./tools/grounding.js";
 import { registerWriteTools } from "./tools/write.js";
+import { registerUpdateTools } from "./tools/update.js";
 import { registerInlineFormTools } from "./tools/inlineForms.js";
 
 const BUILD_GUIDANCE = `You are building a FlowPlus automation flow. Work in this order.
@@ -83,7 +84,9 @@ const BUILD_GUIDANCE = `You are building a FlowPlus automation flow. Work in thi
 
 7. CREATE with flow_create_draft, then read the validation report. Each issue names
    the node (targetKey), the field (fieldPath/configPath) and a suggestedFix. Repair
-   precisely. After about three attempts, stop and report what remains rather than
+   precisely, then apply the corrected document to the SAME draft with
+   flow_update_draft(automationId, definition) — do not mint a new draft per
+   attempt. After about three attempts, stop and report what remains rather than
    guessing.
 
 8. REPORT. Give the user the reviewUrl and state plainly that the flow is a DRAFT
@@ -112,6 +115,7 @@ async function main(): Promise<void> {
   registerInspectTools(server, context);
   registerGroundingTools(server, context);
   registerWriteTools(server, context);
+  registerUpdateTools(server, context);
   registerInlineFormTools(server, context);
 
   // Clients that do not read skill files still get the build loop through this.

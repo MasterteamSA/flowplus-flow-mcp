@@ -136,6 +136,85 @@ try {
       },
     },
   }), 700);
+  // REGRESSION: update-in-place. The repair loop must NOT mint a new draft per
+  // attempt — flow_update_draft revises the same automation id through the
+  // granular design endpoints. Exercise all three mutation kinds: change a
+  // node, add a node + route, then remove them again, and prove the id and the
+  // remaining graph are stable throughout.
+  {
+    const createdBody = JSON.parse(text(await send("tools/call", {
+      name: "flow_create_draft",
+      arguments: {
+        definition: {
+          name: "MCP smoke — update target",
+          triggers: [{ key: "manual", type: "ManualTrigger", name: "Manual start", config: { startNodeKey: "a" } }],
+          nodes: [
+            { key: "a", type: "SetFields", name: "Step A", config: { fields: { a: "1" } }, position: { x: 320, y: 200 } },
+            { key: "b", type: "SetFields", name: "Step B", config: { fields: { b: "1" } }, position: { x: 320, y: 360 } },
+          ],
+          routes: [{ sourceNodeKey: "a", targetNodeKey: "b", routeType: "Default" }],
+        },
+      },
+    })));
+    const id = createdBody.automationId;
+    console.log(`\n${id ? "✓" : "✗"} created update target (automationId=${id})`);
+
+    const grow = await send("tools/call", {
+      name: "flow_update_draft",
+      arguments: {
+        automationId: id,
+        definition: {
+          name: "MCP smoke — update target (renamed)",
+          triggers: [{ key: "manual", type: "ManualTrigger", name: "Manual start", config: { startNodeKey: "a" } }],
+          nodes: [
+            { key: "a", type: "SetFields", name: "Step A v2", config: { fields: { a: "2" } }, position: { x: 320, y: 200 } },
+            { key: "b", type: "SetFields", name: "Step B", config: { fields: { b: "1" } }, position: { x: 320, y: 360 } },
+            { key: "c", type: "SetFields", name: "Step C", config: { fields: { c: "1" } }, position: { x: 320, y: 520 } },
+          ],
+          routes: [
+            { sourceNodeKey: "a", targetNodeKey: "b", routeType: "Default" },
+            { sourceNodeKey: "b", targetNodeKey: "c", routeType: "Default" },
+          ],
+        },
+      },
+    });
+    const growBody = JSON.parse(text(grow));
+    const growOk = !isErr(grow) && growBody.updated === true && growBody.automationId === id;
+    console.log(`${growOk ? "✓" : "✗"} flow_update_draft grow (same id, applied: ${(growBody.appliedChanges ?? []).join("; ")})`);
+
+    const shrink = await send("tools/call", {
+      name: "flow_update_draft",
+      arguments: {
+        automationId: id,
+        definition: {
+          name: "MCP smoke — update target (renamed)",
+          triggers: [{ key: "manual", type: "ManualTrigger", name: "Manual start", config: { startNodeKey: "a" } }],
+          nodes: [
+            { key: "a", type: "SetFields", name: "Step A v2", config: { fields: { a: "2" } }, position: { x: 320, y: 200 } },
+            { key: "b", type: "SetFields", name: "Step B", config: { fields: { b: "1" } }, position: { x: 320, y: 360 } },
+          ],
+          routes: [{ sourceNodeKey: "a", targetNodeKey: "b", routeType: "Default" }],
+        },
+      },
+    });
+    const shrinkBody = JSON.parse(text(shrink));
+    const shrinkOk = !isErr(shrink) && shrinkBody.updated === true;
+    console.log(`${shrinkOk ? "✓" : "✗"} flow_update_draft shrink (applied: ${(shrinkBody.appliedChanges ?? []).join("; ")})`);
+
+    const exported = JSON.parse(text(await send("tools/call", {
+      name: "flow_export",
+      arguments: { automationId: id },
+    })));
+    const def = exported.definition ?? exported;
+    const finalOk =
+      (def.nodes ?? []).length === 2 &&
+      (def.routes ?? []).length === 1 &&
+      def.nodes.some((n) => n.name === "Step A v2") &&
+      def.name === "MCP smoke — update target (renamed)";
+    console.log(`${finalOk ? "✓" : "✗"} exported graph matches the updated definition (2 nodes, 1 route, rename applied)`);
+    if (!growOk || !shrinkOk || !finalOk) process.exitCode = 1;
+  }
+
   // REGRESSION: ParallelStart with four config-defined branches.
   // An earlier version refused this, because it treated the catalog's
   // routeOutputKeys (["branch_a","branch_b"]) as a closed set. It is not — this

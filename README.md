@@ -82,7 +82,9 @@ Other clients get the same guidance from the `build_a_flow` prompt the server re
 
 **Inspect** — `flow_list`, `flow_get`, `flow_export`, `flow_validate`.
 
-**Write** — `flow_create_draft`, gated behind `FLOWPLUS_WRITE_ENABLED`.
+**Write** — `flow_create_draft` and `flow_update_draft` (revises an existing
+draft in place, keeping its id — use it for the repair loop instead of minting
+a new draft per attempt), both gated behind `FLOWPLUS_WRITE_ENABLED`.
 
 There is no publish, activate, or delete tool, by design. An AI-authored graph
 should not reach production unreviewed; the engine classes some node types

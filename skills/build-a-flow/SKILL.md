@@ -120,8 +120,35 @@ Rules that actually bite:
   `$trigger` both look obvious and are both refused as an "unsupported expression
   namespace". Let nodes stamp their own values rather than reaching for ambient
   ones.
-- **Set `position`** so the graph is readable: x around 320, y increasing ~160
-  per step, branches offset left and right.
+- **Do not lay the graph out yourself.** Studio has a dagre auto-layout that
+  knows the real node sizes and ranks the graph left-to-right; you do not, and
+  the coordinates you write override it. Assign a plain ladder — x increasing
+  ~320 along the chain, y offset ~160 for parallel branches — purely so nothing
+  sits at 0,0, then stop.
+
+  Past roughly ten nodes, **tell the user to run Auto-layout** (canvas controls,
+  or `autoLayout` in the command palette) when you hand over the link — it ranks
+  the graph properly instead of honouring whatever you guessed.
+
+  Be honest about its limits, though: auto-layout currently lays out
+  left-to-right, so a *deep* flow still comes out very wide. A 46-node payroll
+  process, 33 ranks deep but only 8 wide, renders about 10,500px across. That is
+  a known Studio limitation, not something your coordinates caused and not
+  something you can fix from here. Say so rather than letting the user think the
+  flow itself is malformed.
+- **Do not add catch-all terminal nodes unless the user asks for them.** It is
+  tempting to give every failure and rejection branch somewhere to land — a
+  shared `halt_inputs`, `halt_payment` or `rework` `Stop` node. Do not. A branch
+  that simply ends is a valid, complete flow; the run stops on its own.
+
+  These sinks are the single biggest cause of unreadable graphs. In one 46-node
+  flow three of them absorbed 16, 15 and 14 incoming edges, which put nearly
+  half the edges (48%) across more than one rank and made the canvas unreadable
+  at any layout direction. They add no behaviour and cost a great deal of
+  legibility.
+
+  Add a `Stop` node only when the user explicitly wants an explicit end state —
+  for example a distinct "cancelled" outcome they need to see or report on.
 - Omitted JSON fields are filled in for you. You do not need to write empty
   `schema`, `authenticationPolicy`, `retryPolicy` and friends.
 
@@ -178,9 +205,17 @@ form, say which step is affected and why.
 node (`targetKey`), the field (`fieldPath` / `configPath`) and often a
 `suggestedFix`. Fix precisely what it names.
 
-Each call creates a **new** draft, so correct the definition properly rather than
-resubmitting hopefully. After about three attempts, stop and report what remains
-— tell the user which node and field are unresolved instead of thrashing.
+Repair on the **same** draft: `flow_update_draft(automationId, definition)`
+applies the corrected document in place, keeping the id and the review link
+stable. Do not call `flow_create_draft` again for a repair — that mints a
+second draft and abandons the first. The document you pass to update is
+authoritative for the whole graph: anything not in it is **deleted** from the
+draft, so always send the complete definition, not just the changed part
+(start from `flow_export` of the same automation if unsure of its current
+state).
+
+After about three attempts, stop and report what remains — tell the user which
+node and field are unresolved instead of thrashing.
 
 ### 6. Report honestly
 

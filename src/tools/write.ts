@@ -1,23 +1,23 @@
 /**
  * The write path — deliberately narrow.
  *
- * One tool, gated behind FLOWPLUS_WRITE_ENABLED, that creates a *draft*
- * automation. There is no publish, no activate and no delete: an AI-authored
- * graph should not be able to reach production without a human looking at it,
- * and the engine classes some node types FinancialOrDestructive.
+ * Two tools, gated behind FLOWPLUS_WRITE_ENABLED: flow_create_draft makes a
+ * *draft* automation, flow_update_draft (update.ts) revises one in place.
+ * There is no publish, no activate and no delete: an AI-authored graph should
+ * not be able to reach production without a human looking at it, and the
+ * engine classes some node types FinancialOrDestructive.
  *
- * Note on iteration: the server's import endpoint only ever creates. It has no
- * update-by-document counterpart, and the per-node endpoints delete one key at a
- * time, so a whole-graph replace would be a fragile N-call dance. Instead we
- * catch structural mistakes locally before spending a call, and each genuine
- * repair attempt produces a new draft. Superseded drafts are deleted by a human
- * in Studio.
+ * Iteration: the import endpoint only ever creates — it takes no automation id
+ * — so revising a draft goes through the granular design endpoints
+ * (PUT nodes/{key}, routes/{routeId}, …) as a diff-and-apply. That lives in
+ * update.ts as flow_update_draft; the pre-flight checks here are shared by
+ * both, exported as preflightDefinition().
  */
 
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { guard, ok, fail, type ToolContext } from "./common.js";
-import { automationDefinitionSchema, checkStructure } from "../schema.js";
+import { guard, ok, fail, type ToolContext, type ToolResult } from "./common.js";
+import { automationDefinitionSchema, checkStructure, type AutomationDefinition } from "../schema.js";
 import { shapeValidation } from "./inspect.js";
 
 const DESIGN = "/api/control-panel/automation-engine";
@@ -35,8 +35,8 @@ export function registerWriteTools(server: McpServer, { client, catalog }: ToolC
         "`nodeType` as each node's `type`.\n\n" +
         "This never publishes or activates anything. The flow will not run until a person " +
         "publishes it. Say so when you report back — do not claim the flow is live.\n\n" +
-        "Each call creates a separate draft, so fix problems before re-submitting rather than " +
-        "iterating blindly.",
+        "Each call creates a SEPARATE draft. To repair validation issues on a draft you already " +
+        "created, use flow_update_draft with its automationId instead of creating another one.",
       inputSchema: {
         definition: automationDefinitionSchema.describe(
           "The automation: name, triggers[], nodes[], routes[]. Matches flow_export's output shape.",
@@ -44,56 +44,10 @@ export function registerWriteTools(server: McpServer, { client, catalog }: ToolC
       },
     },
     guard(async ({ definition }: { definition: unknown }) => {
-      // The local checks run BEFORE the write gate on purpose. A read-only
-      // session is still designing a definition, and telling it "writes are
-      // off" while silently sitting on the knowledge that its AI inputs are
-      // malformed wastes the whole session. Refuse to create, but always say
-      // what is wrong with what you were handed.
-      const parsed = automationDefinitionSchema.safeParse(definition);
-      if (!parsed.success) {
-        return fail(
-          "The definition does not match the expected shape:\n" +
-            parsed.error.issues
-              .map((i) => `  - ${i.path.join(".") || "(root)"}: ${i.message}`)
-              .join("\n"),
-        );
-      }
-      const document = parsed.data;
-
-      // Structural problems are cheap to find here and expensive to debug from a
-      // server error, so refuse before spending the call.
-      const structural = checkStructure(document);
-      if (structural.length) {
-        return fail(
-          "The definition is structurally inconsistent, so it was not submitted:\n" +
-            structural.map((p) => `  - ${p}`).join("\n"),
-        );
-      }
-
-      // Catch invented node/trigger types against the live catalog. The server
-      // would reject these too, but with a far less actionable message.
-      const unknown = await findUnknownTypes(catalog, document);
-      if (unknown.length) {
-        return fail(
-          "These types do not exist on this server:\n" +
-            unknown.map((u) => `  - ${u}`).join("\n") +
-            "\nCall flow_catalog for the real list, and remember to use the PascalCase `nodeType`.",
-        );
-      }
-
-      // Routing from an output the source node does not declare is the most
-      // common authoring mistake — but this is only ever a HINT, never a block.
-      // `routeOutputKeys` is a default declaration, not an exhaustive list:
-      // ParallelStart derives its real outputs from config.branches[].key, so a
-      // four-branch fan-out routes on b1..b4 and is perfectly valid. An earlier
-      // version of this check refused exactly that. The server is the authority.
-      const outputWarnings = [
-        ...(await checkOutputKeys(catalog, document)),
-        ...checkConfigShapes(document),
-        ...checkDuplicateRoutes(document),
-        ...checkExpressionNamespaces(document),
-        ...(await checkNodeAvailability(catalog, document)),
-      ];
+      const flight = await preflightDefinition(catalog, definition);
+      if (flight.error) return flight.error;
+      const document = flight.document;
+      const outputWarnings = flight.warnings;
 
       if (!client.writeEnabled) {
         return fail(
@@ -126,12 +80,91 @@ export function registerWriteTools(server: McpServer, { client, catalog }: ToolC
         ...(outputWarnings.length ? { clientWarnings: outputWarnings } : {}),
         unresolvedCredentialRefs: result?.unresolvedCredentialRefs ?? [],
         reviewUrl: automationId ? client.automationLink(automationId) : undefined,
+        // Hand-written coordinates override Studio's dagre auto-layout, so past
+        // a handful of nodes the handover is incomplete without telling the user
+        // to re-rank. Note auto-layout is left-to-right, so a deep flow is still
+        // very wide afterwards — say so rather than let it read as a bad graph.
+        ...(document.nodes.length > 10
+          ? {
+              layoutAdvice:
+                `This flow has ${document.nodes.length} nodes — too many to place by hand. Tell the user to run ` +
+                "Auto-layout in Studio (canvas controls, or 'autoLayout' in the command palette). " +
+                "Also warn them that Studio lays out left-to-right, so a deep flow stays very wide even " +
+                "after re-ranking; that is a Studio limitation, not a problem with the flow.",
+            }
+          : {}),
         nextStep: validation?.isValid
           ? "The draft is valid. Give the user the reviewUrl so they can inspect and publish it. It is NOT running yet."
-          : "The draft has validation errors. Read each issue's targetKey/fieldPath/suggestedFix, correct the definition, and submit a corrected version.",
+          : "The draft has validation errors. Read each issue's targetKey/fieldPath/suggestedFix, correct the definition, and apply it to THIS draft with flow_update_draft(automationId, definition) — do not create another draft.",
       });
     }),
   );
+}
+
+/**
+ * Shared pre-flight for the write tools. Runs BEFORE the write gate on
+ * purpose: a read-only session is still designing a definition, and telling it
+ * "writes are off" while silently sitting on the knowledge that its AI inputs
+ * are malformed wastes the whole session. Hard failures (shape, structure,
+ * invented types) come back as `error`; everything else is an advisory warning
+ * — `routeOutputKeys` is a default declaration, not an exhaustive list
+ * (ParallelStart derives its real outputs from config.branches[].key), so the
+ * server stays the authority on semantics.
+ */
+export async function preflightDefinition(
+  catalog: ToolContext["catalog"],
+  definition: unknown,
+): Promise<
+  | { error: ToolResult; document?: undefined; warnings?: undefined }
+  | { error?: undefined; document: AutomationDefinition; warnings: string[] }
+> {
+  const parsed = automationDefinitionSchema.safeParse(definition);
+  if (!parsed.success) {
+    return {
+      error: fail(
+        "The definition does not match the expected shape:\n" +
+          parsed.error.issues
+            .map((i) => `  - ${i.path.join(".") || "(root)"}: ${i.message}`)
+            .join("\n"),
+      ),
+    };
+  }
+  const document = parsed.data;
+
+  // Structural problems are cheap to find here and expensive to debug from a
+  // server error, so refuse before spending the call.
+  const structural = checkStructure(document);
+  if (structural.length) {
+    return {
+      error: fail(
+        "The definition is structurally inconsistent, so it was not submitted:\n" +
+          structural.map((p) => `  - ${p}`).join("\n"),
+      ),
+    };
+  }
+
+  // Catch invented node/trigger types against the live catalog. The server
+  // would reject these too, but with a far less actionable message.
+  const unknown = await findUnknownTypes(catalog, document);
+  if (unknown.length) {
+    return {
+      error: fail(
+        "These types do not exist on this server:\n" +
+          unknown.map((u) => `  - ${u}`).join("\n") +
+          "\nCall flow_catalog for the real list, and remember to use the PascalCase `nodeType`.",
+      ),
+    };
+  }
+
+  const warnings = [
+    ...(await checkOutputKeys(catalog, document)),
+    ...checkConfigShapes(document),
+    ...checkDuplicateRoutes(document),
+    ...checkExpressionNamespaces(document),
+    ...(await checkNodeAvailability(catalog, document)),
+  ];
+
+  return { document, warnings };
 }
 
 /**
