@@ -1,11 +1,11 @@
 {
   "mcpServers": {
     "flowplus": {
-      "command": "node",
-      "args": ["/Users/mhd/Projects/RiderProjects/flowplus-flow-mcp/dist/index.js"],
+      "command": "/absolute/path/to/node",
+      "args": ["/absolute/path/to/flowplus-flow-mcp/dist/index.js"],
       "env": {
         "FLOWPLUS_BASE_URL": "http://localhost:5012",
-        "FLOWPLUS_USERNAME": "admin",
+        "FLOWPLUS_USERNAME": "your-service-account",
         "FLOWPLUS_PASSWORD": "your-password",
         "FLOWPLUS_STUDIO_URL": "http://localhost:4400",
         "FLOWPLUS_WRITE_ENABLED": "true"

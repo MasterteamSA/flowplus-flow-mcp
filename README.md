@@ -12,7 +12,7 @@ natural-language description.
 Works with any MCP client — Claude Code, Codex, Cursor. Nothing is added to the
 FlowPlus backend; this is purely a client of its existing design API.
 
-## Why this is thin
+## How it works
 
 The FlowPlus automation engine is already self-describing. `builder/catalog`
 returns the whole vocabulary — trigger types, ~52 node types each with a JSON
@@ -23,39 +23,82 @@ So this server contains no flow logic. It exchanges tokens, keeps the catalog
 from flooding the model's context, checks a few things locally that are cheaper
 to catch here than after a round trip, and refuses to publish anything.
 
-## Setup
+The loop it enables: describe → ground every reference (modules, forms,
+assignees) → fetch schemas for only the node types needed → compose the
+definition → `flow_create_draft` → repair against the validation report with
+`flow_update_draft` → hand the user a Studio link to review and publish.
+
+## Requirements
+
+- **Node.js 20+** (developed on 22).
+- A reachable **FlowPlus backend** (local or remote) with the automation engine
+  feature enabled — the design endpoints return 503 when it is off.
+- A FlowPlus **user account** for the server to authenticate with. Prefer a
+  dedicated service account: the drafts it creates are attributed to this user,
+  and its permissions bound what the AI can see.
+
+## Installation
 
 ```bash
-npm install && npm run build
+git clone https://github.com/MasterteamSA/flowplus-flow-mcp.git
+cd flowplus-flow-mcp
+npm install
+npm run build
 ```
 
-Configure via environment:
+The server is the compiled `dist/index.js`. It speaks MCP over stdio — your AI
+client launches it; you never run it by hand (except to test).
 
-| Variable | Required | Default | |
+## Configuration
+
+Everything is environment variables, passed by the MCP client at launch:
+
+| Variable | Required | Default | Notes |
 |---|---|---|---|
-| `FLOWPLUS_BASE_URL` | yes | | e.g. `http://localhost:5012` |
-| `FLOWPLUS_USERNAME` | yes | | |
+| `FLOWPLUS_BASE_URL` | yes | | API origin, e.g. `http://localhost:5012` or your gateway URL |
+| `FLOWPLUS_USERNAME` | yes | | account the server logs in as |
 | `FLOWPLUS_PASSWORD` | yes | | |
-| `FLOWPLUS_APP_CODE` | | `flowplus2` | application code for the token exchange |
-| `FLOWPLUS_STUDIO_URL` | | `http://localhost:4400` | used to build review links |
-| `FLOWPLUS_TENANT_ID` | | | sent as `X-Tenant-Id` when set |
-| `FLOWPLUS_WRITE_ENABLED` | | `false` | **must be `true` to create drafts** |
-| `FLOWPLUS_TIMEOUT_MS` | | `60000` | |
+| `FLOWPLUS_APP_CODE` | | `flowplus2` | application code for the two-step token exchange (`/api/auth/login` → `/api/applications/{code}/launch`) |
+| `FLOWPLUS_STUDIO_URL` | | `http://localhost:4400` | origin used to build the `reviewUrl` links |
+| `FLOWPLUS_TENANT_ID` | | | sent as `X-Tenant-Id` when set; omit for single-tenant |
+| `FLOWPLUS_WRITE_ENABLED` | | `false` | **must be `true` to create or update drafts.** Leave unset for a read-only explorer |
+| `FLOWPLUS_TIMEOUT_MS` | | `60000` | per-request timeout |
 
-Register it. Prefer **user level** (`~/.claude.json`, or your client's equivalent) over a
-`.mcp.json` inside the FlowPlus repos — a flow-builder should not have the backend source in
-reach. Give it its own empty working directory:
+Two rules of thumb:
+
+- **Register at user level**, not with a `.mcp.json` inside the FlowPlus
+  repos — a flow-builder should not have the backend source in reach, and the
+  skill deliberately abstracts the system away from the coding agent.
+- **Use an absolute path to `node`** in the config. MCP clients launch servers
+  with a minimal `PATH`; if Node came from nvm/mise/homebrew, plain `"node"`
+  often fails to resolve. `which node` tells you the path to use.
+
+### Claude Code
+
+Either register from the terminal:
+
+```bash
+claude mcp add flowplus --scope user \
+  --env FLOWPLUS_BASE_URL=http://localhost:5012 \
+  --env FLOWPLUS_USERNAME=your-service-account \
+  --env FLOWPLUS_PASSWORD=your-password \
+  --env FLOWPLUS_WRITE_ENABLED=true \
+  -- "$(which node)" /absolute/path/to/flowplus-flow-mcp/dist/index.js
+```
+
+…or add it to `~/.claude.json` yourself:
 
 ```json
 {
   "mcpServers": {
     "flowplus": {
-      "command": "node",
+      "command": "/absolute/path/to/node",
       "args": ["/absolute/path/to/flowplus-flow-mcp/dist/index.js"],
       "env": {
         "FLOWPLUS_BASE_URL": "http://localhost:5012",
-        "FLOWPLUS_USERNAME": "admin",
-        "FLOWPLUS_PASSWORD": "…",
+        "FLOWPLUS_USERNAME": "your-service-account",
+        "FLOWPLUS_PASSWORD": "your-password",
+        "FLOWPLUS_STUDIO_URL": "http://localhost:4400",
         "FLOWPLUS_WRITE_ENABLED": "true"
       }
     }
@@ -63,13 +106,59 @@ reach. Give it its own empty working directory:
 }
 ```
 
-Install the skill at user level too, so it travels with you rather than with a checkout:
+Then install the skill at user level, so it travels with you rather than with a
+checkout:
 
 ```bash
 cp -r skills/build-a-flow ~/.claude/skills/
 ```
 
-Other clients get the same guidance from the `build_a_flow` prompt the server registers.
+The skill teaches the build loop (ground first, compose, repair on the same
+draft) and the sharp edges (output keys, rework loops must be unrolled, inline
+forms). Without it the model still works but rediscovers those the hard way.
+
+### Codex
+
+Add to `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.flowplus]
+command = "/absolute/path/to/node"
+args = ["/absolute/path/to/flowplus-flow-mcp/dist/index.js"]
+startup_timeout_sec = 60
+
+[mcp_servers.flowplus.env]
+FLOWPLUS_BASE_URL = "http://localhost:5012"
+FLOWPLUS_USERNAME = "your-service-account"
+FLOWPLUS_PASSWORD = "your-password"
+FLOWPLUS_STUDIO_URL = "http://localhost:4400"
+FLOWPLUS_WRITE_ENABLED = "true"
+```
+
+Codex has no skills directory; it gets the same build-loop guidance through the
+`build_a_flow` prompt the server registers.
+
+### Other MCP clients
+
+Any client that can launch a stdio server works: command = node, args =
+`dist/index.js`, env as above. The `build_a_flow` prompt carries the guidance.
+
+## Verify the setup
+
+1. Restart your AI client (a running session keeps the old server process).
+2. Ask it to list its flow tools — you should see **18 tools**, `flow_catalog`
+   through `flow_update_draft`. In Claude Code, `/mcp` shows the server status
+   directly.
+3. Ask something read-only first: *"list the automations in FlowPlus"* →
+   `flow_list` should return real data.
+4. Then the real thing: *"build a flow that runs every Monday at 9am and emails
+   a summary to the finance group"*. Expect grounding calls, a draft, and a
+   Studio `reviewUrl` — and the words "draft, not running", because nothing
+   this server does can publish.
+
+On startup the server logs one line to stderr
+(`flowplus-flow-mcp ready against … writes=enabled`), which MCP clients surface
+in their server logs.
 
 ## Tools
 
@@ -84,15 +173,32 @@ Other clients get the same guidance from the `build_a_flow` prompt the server re
 
 **Write** — `flow_create_draft` and `flow_update_draft` (revises an existing
 draft in place, keeping its id — use it for the repair loop instead of minting
-a new draft per attempt), both gated behind `FLOWPLUS_WRITE_ENABLED`.
+a new draft per attempt), plus `flow_create_inline_form` /
+`flow_validate_inline_form` for HumanTask forms. All gated behind
+`FLOWPLUS_WRITE_ENABLED`.
 
 There is no publish, activate, or delete tool, by design. An AI-authored graph
 should not reach production unreviewed; the engine classes some node types
 `FinancialOrDestructive`.
 
+## Troubleshooting
+
+| Symptom | Cause / fix |
+|---|---|
+| Server never appears in the client | `command` is `"node"` but Node is not on the client's minimal PATH — use the absolute path from `which node`. Check the client's MCP logs for the stderr line. |
+| `FLOWPLUS_BASE_URL is not set` on startup | The env block is missing or in the wrong scope/file for your client. |
+| Every design call returns 503 | The automation engine feature gate is off for the tenant — enable it in Control Panel. |
+| `AUTH_002` / login failures | Wrong credentials, or `FLOWPLUS_APP_CODE` doesn't match an application the account can launch. The server does the session→application token exchange itself; you only supply username/password. |
+| "Draft creation is disabled" | Working as intended: set `FLOWPLUS_WRITE_ENABLED=true` and restart the client. |
+| Tools respond but writes 404 on a specific automation | Wrong tenant — set `FLOWPLUS_TENANT_ID` to the tenant that owns the automation. |
+| Client still shows 17 tools after an update | It's running the old process. Rebuild (`npm run build`), then restart the session or reconnect via `/mcp`. |
+
 ## Implementation notes
 
-Server quirks, workarounds and design rationale live in [docs/MAINTAINING.md](docs/MAINTAINING.md). That is maintainer material — people *building flows* need none of it, and should not need the FlowPlus source either.
+Server quirks, workarounds and design rationale live in
+[docs/MAINTAINING.md](docs/MAINTAINING.md). That is maintainer material —
+people *building flows* need none of it, and should not need the FlowPlus
+source either.
 
 ## Development
 
@@ -102,5 +208,7 @@ npm run inspect                                  # MCP Inspector UI
 node scripts/smoke.mjs                           # scripted end-to-end run
 ```
 
-`scripts/smoke.mjs` exercises the tool list, the safety gates, and a real draft
-creation against a running FlowPlus instance. It expects the env vars above.
+`scripts/smoke.mjs` exercises the tool list, the safety gates, draft creation,
+and the update-in-place regression (create → grow → shrink → export) against a
+running FlowPlus instance. It expects the env vars above. Note it leaves its
+clearly-named scratch drafts behind — there is deliberately no delete API.
