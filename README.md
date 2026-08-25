@@ -39,14 +39,22 @@ definition → `flow_create_draft` → repair against the validation report with
 
 ## Installation
 
-### From npm (recommended)
+### Via npx from GitHub (recommended — no npm account needed)
 
-Nothing to install up front — reference the package with `npx` in your client
-config (below) and it is fetched and run automatically:
+Nothing to install up front — reference the repo with `npx` in your client
+config (below) and it is cloned, built, and run automatically using your
+existing GitHub access:
 
 ```bash
-npx -y flowplus-flow-mcp
+npx -y github:MasterteamSA/flowplus-flow-mcp
 ```
+
+The first run takes a minute (clone + TypeScript build); after that it runs
+from the npx cache. To pick up a newer version later, clear that cache:
+`rm -rf ~/.npm/_npx`.
+
+(If the package is ever published to the npm registry, the spec shortens to
+`npx -y flowplus-flow-mcp` — everything else stays the same.)
 
 ### From source
 
@@ -95,7 +103,7 @@ claude mcp add flowplus --scope user \
   --env FLOWPLUS_USERNAME=your-service-account \
   --env FLOWPLUS_PASSWORD=your-password \
   --env FLOWPLUS_WRITE_ENABLED=true \
-  -- npx -y flowplus-flow-mcp
+  -- npx -y github:MasterteamSA/flowplus-flow-mcp
 ```
 
 …or add it to `~/.claude.json` yourself:
@@ -105,7 +113,7 @@ claude mcp add flowplus --scope user \
   "mcpServers": {
     "flowplus": {
       "command": "npx",
-      "args": ["-y", "flowplus-flow-mcp"],
+      "args": ["-y", "github:MasterteamSA/flowplus-flow-mcp"],
       "env": {
         "FLOWPLUS_BASE_URL": "http://localhost:5012",
         "FLOWPLUS_USERNAME": "your-service-account",
@@ -147,7 +155,7 @@ Add to `~/.codex/config.toml`:
 ```toml
 [mcp_servers.flowplus]
 command = "npx"
-args = ["-y", "flowplus-flow-mcp"]
+args = ["-y", "github:MasterteamSA/flowplus-flow-mcp"]
 startup_timeout_sec = 60
 
 [mcp_servers.flowplus.env]
@@ -164,7 +172,7 @@ Codex has no skills directory; it gets the same build-loop guidance through the
 ### Other MCP clients
 
 Any client that can launch a stdio server works: command = `npx`, args =
-`["-y", "flowplus-flow-mcp"]`, env as above. The `build_a_flow` prompt carries
+`["-y", "github:MasterteamSA/flowplus-flow-mcp"]`, env as above. The `build_a_flow` prompt carries
 the guidance.
 
 ## Verify the setup
