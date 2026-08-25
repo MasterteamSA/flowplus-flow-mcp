@@ -39,6 +39,17 @@ definition → `flow_create_draft` → repair against the validation report with
 
 ## Installation
 
+### From npm (recommended)
+
+Nothing to install up front — reference the package with `npx` in your client
+config (below) and it is fetched and run automatically:
+
+```bash
+npx -y flowplus-flow-mcp
+```
+
+### From source
+
 ```bash
 git clone https://github.com/MasterteamSA/flowplus-flow-mcp.git
 cd flowplus-flow-mcp
@@ -46,8 +57,8 @@ npm install
 npm run build
 ```
 
-The server is the compiled `dist/index.js`. It speaks MCP over stdio — your AI
-client launches it; you never run it by hand (except to test).
+The server is the compiled `dist/index.js`. Either way it speaks MCP over
+stdio — your AI client launches it; you never run it by hand (except to test).
 
 ## Configuration
 
@@ -69,9 +80,10 @@ Two rules of thumb:
 - **Register at user level**, not with a `.mcp.json` inside the FlowPlus
   repos — a flow-builder should not have the backend source in reach, and the
   skill deliberately abstracts the system away from the coding agent.
-- **Use an absolute path to `node`** in the config. MCP clients launch servers
-  with a minimal `PATH`; if Node came from nvm/mise/homebrew, plain `"node"`
-  often fails to resolve. `which node` tells you the path to use.
+- **When running from source, use an absolute path to `node`** in the config.
+  MCP clients launch servers with a minimal `PATH`; if Node came from
+  nvm/mise/homebrew, plain `"node"` often fails to resolve. `which node` tells
+  you the path to use. (The `npx` form avoids the whole issue.)
 
 ### Claude Code
 
@@ -83,7 +95,7 @@ claude mcp add flowplus --scope user \
   --env FLOWPLUS_USERNAME=your-service-account \
   --env FLOWPLUS_PASSWORD=your-password \
   --env FLOWPLUS_WRITE_ENABLED=true \
-  -- "$(which node)" /absolute/path/to/flowplus-flow-mcp/dist/index.js
+  -- npx -y flowplus-flow-mcp
 ```
 
 …or add it to `~/.claude.json` yourself:
@@ -92,8 +104,8 @@ claude mcp add flowplus --scope user \
 {
   "mcpServers": {
     "flowplus": {
-      "command": "/absolute/path/to/node",
-      "args": ["/absolute/path/to/flowplus-flow-mcp/dist/index.js"],
+      "command": "npx",
+      "args": ["-y", "flowplus-flow-mcp"],
       "env": {
         "FLOWPLUS_BASE_URL": "http://localhost:5012",
         "FLOWPLUS_USERNAME": "your-service-account",
@@ -106,8 +118,19 @@ claude mcp add flowplus --scope user \
 }
 ```
 
-Then install the skill at user level, so it travels with you rather than with a
-checkout:
+Running from a source checkout instead, swap the command for
+`"/absolute/path/to/node"` with args
+`["/absolute/path/to/flowplus-flow-mcp/dist/index.js"]`.
+
+Then install the skill. **Easiest for teams**: add the Masterteam plugin
+marketplace, which installs the server registration and the skill together —
+
+```
+/plugin marketplace add MasterteamSA/claude-plugins
+/plugin install flowplus@masterteam
+```
+
+— or, from a source checkout, copy the skill to user level yourself:
 
 ```bash
 cp -r skills/build-a-flow ~/.claude/skills/
@@ -123,8 +146,8 @@ Add to `~/.codex/config.toml`:
 
 ```toml
 [mcp_servers.flowplus]
-command = "/absolute/path/to/node"
-args = ["/absolute/path/to/flowplus-flow-mcp/dist/index.js"]
+command = "npx"
+args = ["-y", "flowplus-flow-mcp"]
 startup_timeout_sec = 60
 
 [mcp_servers.flowplus.env]
@@ -140,8 +163,9 @@ Codex has no skills directory; it gets the same build-loop guidance through the
 
 ### Other MCP clients
 
-Any client that can launch a stdio server works: command = node, args =
-`dist/index.js`, env as above. The `build_a_flow` prompt carries the guidance.
+Any client that can launch a stdio server works: command = `npx`, args =
+`["-y", "flowplus-flow-mcp"]`, env as above. The `build_a_flow` prompt carries
+the guidance.
 
 ## Verify the setup
 
